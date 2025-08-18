@@ -1,13 +1,12 @@
 import yaml
 import torch
 import numpy as np
+from sklearn.cluster import DBSCAN
 from torch.nn import functional as F
 class Predictor:
     def __init__(self, model_settings_path: str):
         """Initializes the Predictor with a model and its settings.
 
-        :param model_path: Path to the model file
-        :type model_path: str
         :param model_settings_path: Path to the YAML file containing model settings
         :type model_settings_path: str
         """
@@ -17,27 +16,96 @@ class Predictor:
             print(f"Using device: {self.device}")
             self.model_settings = self._load_model_settings(model_settings_path)
             self.model = self._init_model(self.model_settings['model_type'], model_state_dict=None)
-            self.model.load_state_dict(torch.load(self.model_settings['pth_path'], map_location='cpu'))
+            self.model.load_state_dict(torch.load(self.model_settings['pth_path'], map_location=self.device))
             self.model.eval()
-            self.predictor = SlidingWindowCrop(
-                window_size=self.model_settings['window_size'],
-                overlap=self.model_settings['overlap'],
-            )
             
         except Exception as e:
             raise RuntimeError(f"Failed to initialize Predictor: {e}")
 
-    def __call__(self, image: torch.Tensor) -> torch.Tensor:
+    def __call__(self, image: torch.Tensor | np.ndarray, mode:str = 'slide_window') -> torch.Tensor:
         """Runs the model on the input tensor.
 
         :param image: Input tensor to the model
+        :param mode: Inference mode ('slide_window' or 'normal')
         :type image: torch.Tensor
+        :type mode: str
         :return: Model output
         :rtype: torch.Tensor
         """
         with torch.no_grad():
-            output = self.predictor(self.model, image)
-            return output.cpu().numpy()
+            if isinstance(image, np.ndarray):
+                # Convert numpy array to tensor
+                if len(image.shape) == 3 and image.shape[2] == 3:  # H, W, C format
+                    image = torch.from_numpy(image.transpose(2, 0, 1)).float() / 255.0
+                else:
+                    raise ValueError("Input image should be in H, W, C format for numpy arrays")
+            elif isinstance(image, torch.Tensor):
+                if image.dim() != 3 or image.size(0) != 3:
+                    raise ValueError("Input tensor should be in C, H, W format for PyTorch tensors")
+            
+            image = image.to(self.device)
+            
+            if mode == 'slide_window':
+                predictor = SlidingWindowCrop(
+                    window_size=self.model_settings['window_size'],
+                    overlap=self.model_settings['overlap'],
+                )
+            elif mode == 'normal':
+                # For normal mode, ensure we add batch dimension
+                predictor = lambda model, img: torch.sigmoid(model(img.unsqueeze(0))).squeeze(0)
+            else:
+                raise ValueError(f"Unsupported mode: {mode}")
+            
+            output = predictor(self.model, image)
+            output = output.cpu().numpy()
+            return output
+        
+    def dbscan(self, output, eps=0.5, min_samples=5):
+        """Applies DBSCAN clustering on the output mask.
+
+        :param output: Model output mask
+        :type output: np.ndarray
+        :param threshold: Threshold to binarize the output
+        :type threshold: float
+        :param eps: DBSCAN epsilon parameter
+        :type eps: float
+        :param min_samples: DBSCAN minimum samples parameter
+        :type min_samples: int
+        :return: Clustering result as a binary mask
+        :rtype: np.ndarray
+        """
+        
+        if output.max() > 1.0:
+            output = output / 255.0 # Normalize to 0-1 range
+        
+        coords = np.column_stack(np.where(output))
+
+        
+        if coords.shape[0] == 0:
+            return np.zeros_like(output)
+        
+        clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(coords)
+        labels = clustering.labels_
+        
+        unique_labels = np.unique(labels)
+        
+        # Count points in each valid cluster
+        valid_clusters = 0
+        for label in unique_labels:
+            if label != -1:
+                valid_clusters += 1
+        
+        print(f"Total valid clusters: {valid_clusters}")
+        
+        output_dbscan = np.zeros_like(output)
+        for label in unique_labels:
+            if label != -1:
+                cluster_mask = labels == label
+                output_dbscan[coords[cluster_mask, 0], coords[cluster_mask, 1]] = 1
+                
+        output_dbscan = (output_dbscan * 255).astype(np.uint8) # back to 0-255 range
+        
+        return output_dbscan
 
     def _load_model_settings(self, file_path):
         """Loads model settings from a YAML file.
@@ -211,9 +279,18 @@ if __name__ == "__main__":
     # Test Functionality
     import cv2
     image_path = '137.jpg'
-    predictor = Predictor(model_path='IW_crack/hnet.pth', model_settings_path='model_settings.yaml')
+    predictor = Predictor(model_settings_path='model_settings.yaml')
     image = cv2.imread(image_path)
-    output = predictor(image)
+    output_original = predictor(image)
+    output = predictor.dbscan(output_original, threshold=0.5, eps=5, min_samples=5)
     import matplotlib.pyplot as plt
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1)
+    plt.imshow(output_original, cmap='gray')
+    plt.title('Original Output')
+    plt.axis('off')
+    plt.subplot(1, 2, 2)
     plt.imshow(output, cmap='gray')
+    plt.title('DBSCAN Output')
+    plt.axis('off')
     plt.show()

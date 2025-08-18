@@ -2,12 +2,31 @@ const log = console.log
 export class Canvas {
     constructor(mask_canvas_ID, image_canvas_ID, magic_pen_canvas_ID) {
 
-        // Mode properties
+        // draw mode properties
         this.foreground_color = 'rgb(255, 255, 255)'; // White
         this.background_color = 'rgb(0, 0, 0)'; // Black
-        this.magic_pen_color = 'rgba(255, 0, 255, 0.01)'; // Semi-transparent magenta
         this.draw_size = 5;
-        this.magic_pen_size = 200;
+        
+
+        // magic_pen mode properties
+        this.crop_size = 200;
+        this.magic_pen_size = this.crop_size / 2; // Magic pen size is half of crop size
+        this.magic_pen_color = 'rgba(255, 0, 255, 1)'; // Semi-transparent magenta
+        this.crop_every_len = 200;
+        
+        this.line_len = 0;
+        this.crops = [];
+        this.predict_mode = "normal";
+
+        // morphology properties
+        this.apply_morphology = true; // Whether to apply morphological filtering
+        this.morph_kernel_size = 3; // Size of the kernel for morphological operations
+        this.morph_iterations = 2; // Number of iterations for morphological operations
+
+        // DBSCAN properties
+        this.apply_dbscan = true; // Whether to apply DBSCAN clustering
+        this.db_eps = 10; // DBSCAN epsilon parameter (distance threshold)
+        this.db_min_samples = 5; // DBSCAN minimum samples parameter
 
         // brush properties
         this.brush_mode = 'draw';
@@ -16,7 +35,7 @@ export class Canvas {
         this.brush_spacing = 1;
         this.drawing = false;
         this.last_pos = false;
-        this.line_len = 0;
+        
 
         // Window properties
         this.dragging = false;
@@ -38,7 +57,7 @@ export class Canvas {
         this.mask_canvas = document.getElementById(mask_canvas_ID);
         this.mask_ctx = this.mask_canvas.getContext('2d', { willReadFrequently: true });
         this.img_canvas = document.getElementById(image_canvas_ID);
-        this.img_ctx = this.img_canvas.getContext('2d');
+        this.img_ctx = this.img_canvas.getContext('2d', { willReadFrequently: true });
         this.magic_pen_canvas = document.getElementById(magic_pen_canvas_ID);
         this.magic_pen_ctx = this.magic_pen_canvas.getContext('2d', { willReadFrequently: true });
         this.magic_pen_ctx.strokeStyle = this.magic_pen_color;
@@ -87,6 +106,10 @@ export class Canvas {
 
     add_event_listener(event, callback) {
         this.mask_canvas.addEventListener(event, callback);
+        this.mask_canvas.addEventListener('magicPenCrop', (event) => {
+            const crop = event.detail.crop;
+            console.log(`New crop created at (${crop.centerX}, ${crop.centerY})`);
+        });
     }
 
     mouseLeave(e) {
@@ -107,8 +130,14 @@ export class Canvas {
                 this.last_pos = [x, y];
             }
             else if (this.brush_mode === 'magic_pen') {
+                this.clear_magic_pen();
                 this.drawing = true;
-                this.line_len = 0; 
+                this.line_len = 0;
+                
+                // Ensure magic pen context is properly set
+                this.magic_pen_ctx.fillStyle = this.magic_pen_color;
+                this.magic_pen_ctx.strokeStyle = this.magic_pen_color;
+                
                 let [x, y] = this.getMouseXY(e);
                 this.drawPoint(x, y, this.magic_pen_ctx);
                 this.last_pos = [x, y];
@@ -117,19 +146,25 @@ export class Canvas {
     }
 
     mouseUp(e) {
-        if (this.crop) {
-            return;
-        }
         if (e.button === 0) {
             if (this.brush_mode === 'draw') {
                 this.drawing = false;
                 this.last_pos = false;
                 this.removeGray();
             }
-            else if (this.brush_mode === 'magic_pen') {
+            else if (this.brush_mode === 'magic_pen' && this.drawing) {
                 this.drawing = false;
                 this.last_pos = false;
-                this.clear_magic_pen();
+                this.sendCropsForPrediction().then(results => {
+                    // Handle the predicted crops
+                    console.log("Predicted crops:", results);
+                    this.clear_magic_pen();
+                    this.clearCrops();
+                }).catch(error => {
+                    console.error("Error predicting crops:", error);
+                    this.clear_magic_pen();
+                    this.clearCrops();
+                });
             }
         }
     }
@@ -151,8 +186,6 @@ export class Canvas {
                 let [x, y] = this.getMouseXY(e);
                 this.drawPoint(x, y, this.magic_pen_ctx);
                 this.last_pos = [x, y];
-                log(`Drawing with magic pen at (${x}, ${y})`);
-                log(`Line length: ${this.line_len}`);
             }
         }
     }
@@ -304,28 +337,67 @@ export class Canvas {
         return this.mask_canvas.toDataURL("image/png");
     }
 
-    cropImageBase64(x1, y1, x2, y2) {
-        // Ensure coordinates are in the right order
-        const [startX, startY] = [Math.min(x1, x2), Math.min(y1, y2)];
-        const [endX, endY] = [Math.max(x1, x2), Math.max(y1, y2)];
-
-        // Calculate width and height of the crop
-        const cropWidth = endX - startX;
-        const cropHeight = endY - startY;
-
-        // Create a temporary mask_canvas for the crop
-        const cropCanvas = document.createElement('mask_canvas');
-        cropCanvas.width = cropWidth;
+    cropImageBase64(centerX, centerY, cropWidth, cropHeight) {
+        // Calculate the top-left corner from center coordinates
+        const startX = Math.floor(centerX - cropWidth / 2);
+        const startY = Math.floor(centerY - cropHeight / 2);
+        
+        // Ensure coordinates are within canvas bounds
+        const clampedStartX = Math.max(0, startX);
+        const clampedStartY = Math.max(0, startY);
+        const clampedEndX = Math.min(this.canvas_width, startX + cropWidth);
+        const clampedEndY = Math.min(this.canvas_height, startY + cropHeight);
+        
+        // Calculate actual crop dimensions (might be smaller if near edges)
+        const actualCropWidth = clampedEndX - clampedStartX;
+        const actualCropHeight = clampedEndY - clampedStartY;
+        
+        // Create a temporary canvas for the crop
+        const cropCanvas = document.createElement('canvas');
+        cropCanvas.width = cropWidth;  // Use requested dimensions
         cropCanvas.height = cropHeight;
         const cropCtx = cropCanvas.getContext('2d');
-
-        // First, crop from the image mask_canvas
-        if (this.img_ctx) {
-            const imageData = this.img_ctx.getImageData(startX, startY, cropWidth, cropHeight);
-            cropCtx.putImageData(imageData, 0, 0);
+        
+        // Fill with black background (in case crop extends beyond canvas)
+        cropCtx.fillStyle = 'rgb(0, 0, 0)';
+        cropCtx.fillRect(0, 0, cropWidth, cropHeight);
+        
+        // Calculate offset to center the actual crop in the output canvas
+        const offsetX = (cropWidth - actualCropWidth) / 2;
+        const offsetY = (cropHeight - actualCropHeight) / 2;
+        
+        // Extract the crop region from the image canvas
+        if (this.img_ctx && actualCropWidth > 0 && actualCropHeight > 0) {
+            const imageData = this.img_ctx.getImageData(
+                clampedStartX, 
+                clampedStartY, 
+                actualCropWidth, 
+                actualCropHeight
+            );
+            
+            // Create a temporary canvas to hold the cropped image data
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = actualCropWidth;
+            tempCanvas.height = actualCropHeight;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.putImageData(imageData, 0, 0);
+            
+            // Draw the cropped image onto the final canvas, centered
+            cropCtx.drawImage(
+                tempCanvas,
+                0, 0, actualCropWidth, actualCropHeight,  // Source
+                offsetX, offsetY, actualCropWidth, actualCropHeight  // Destination
+            );
         }
+        
         // Convert to base64 and return
-        return cropCanvas.toDataURL("image/png");
+        return {
+            img: cropCanvas.toDataURL("image/png"),
+            centerX: centerX,
+            centerY: centerY,
+            width: cropWidth,
+            height: cropHeight
+        };
     }
 
     replaceMaskRegionWithImage(x, y, width, height, image) {
@@ -367,8 +439,8 @@ export class Canvas {
         if (this.last_pos) {
             let [x0, y0] = this.last_pos;
             let d = this.dist(x0, y0, x, y);
+            this.line_len += d;
             if (d > this.brush_spacing) {
-                this.line_len += d;
                 let spacing_ratio = this.brush_spacing / d;
                 let spacing_ratio_total = spacing_ratio;
                 while (spacing_ratio_total <= 1) {
@@ -378,19 +450,41 @@ export class Canvas {
                     // Draw at the interpolated point
                     this.drawCircle(xn, yn, this.brush_width, ctx);
 
+                    // Magic pen mode: crop at regular intervals
+                    if (this.brush_mode === 'magic_pen' && ctx === this.magic_pen_ctx) {
+                        this.handleMagicPenCropping(xn, yn);
+                    }
+
                     spacing_ratio_total += spacing_ratio;
                 }
             } else {
                 this.drawCircle(x, y, this.brush_width, ctx);
+                
+                // Magic pen mode: crop at current point
+                if (this.brush_mode === 'magic_pen' && ctx === this.magic_pen_ctx) {
+                    this.handleMagicPenCropping(x, y);
+                }
             }
         } else {
             this.drawCircle(x, y, this.brush_width, ctx);
+            
+            // Magic pen mode: crop at starting point
+            if (this.brush_mode === 'magic_pen' && ctx === this.magic_pen_ctx) {
+                this.handleMagicPenCropping(x, y);
+            }
         }
     }
 
     drawCircle(x, y, width, ctx) {
-        ctx.fillStyle = this.color;
-        ctx.strokeStyle = this.color;
+        // Set the correct fill and stroke style based on the context
+        if (ctx === this.magic_pen_ctx) {
+            ctx.fillStyle = this.magic_pen_color;
+            ctx.strokeStyle = this.magic_pen_color;
+        } else {
+            ctx.fillStyle = this.color;
+            ctx.strokeStyle = this.color;
+        }
+        
         ctx.beginPath();
         ctx.imageSmoothingEnabled = false;
         ctx.arc(x, y, width, 0, 2 * Math.PI);
@@ -434,10 +528,22 @@ export class Canvas {
     }
 
     changeBrushSize(size) {
-        if (this.brush_width + size < 1) {
-            return; // Prevent brush size from going below 1
+        if (this.brush_mode === 'draw'){
+            if (this.brush_width + size < 1) {
+                return; // Prevent brush size from going below 1
+            }
+            this.draw_size += size;
+            this.brush_width = this.draw_size; // Update brush width to match draw size
         }
-        this.brush_width += size;
+        else if (this.brush_mode === 'magic_pen') {
+            if (this.crop_size + size < 128 || this.crop_size + size > 512) {
+                return; // Prevent magic pen size from going below 128 or above 512
+            }
+            this.crop_size += size;
+            this.crop_every_len = this.crop_size / 2; // Update crop interval to match new crop size
+            this.magic_pen_size = this.crop_size / 2; // Update magic pen size to match crop size
+            this.brush_width = this.magic_pen_size;
+        }
         this.updateCustomCursor(); // Update cursor to match new size
     }
 
@@ -614,4 +720,242 @@ export class Canvas {
             this.mask_ctx.putImageData(state, 0, 0);
         }
     }
+
+
+    // ============================================================
+    // Magic Pen Cropping Functions
+    // ============================================================
+
+    handleMagicPenCropping(x, y) {
+        // Check if we should create a crop at this distance
+        x = Math.floor(x);
+        y = Math.floor(y);
+        if (this.line_len >= this.crop_every_len * (this.crops.length)) {
+            this.createCropAtPosition(x, y);
+            log(`Created crop ${this.crops.length} at position (${x}, ${y}) after ${this.line_len} pixels`);
+        }
+    }
+
+    createCropAtPosition(centerX, centerY) {
+        try {
+            // Create a crop using the existing cropImageBase64 method
+            const cropData = this.cropImageBase64(centerX, centerY, this.crop_size, this.crop_size);
+            
+            // Add to crops array with additional metadata
+            const crop = {
+                id: this.crops.length,
+                image_base64: cropData.img,
+                centerX: centerX,
+                centerY: centerY,
+                width: this.crop_size,
+                height: this.crop_size,
+                canvas_width: this.canvas_width,
+                canvas_height: this.canvas_height,
+                timestamp: Date.now(),
+                line_distance: this.line_len
+            };
+            
+            this.crops.push(crop);
+            
+            // Optional: Trigger a custom event that other parts of the application can listen to
+            this.dispatchCropEvent(crop);
+            
+            return crop;
+        } catch (error) {
+            console.error('Error creating crop at position:', error);
+            return null;
+        }
+    }
+
+    dispatchCropEvent(crop) {
+        // Create and dispatch a custom event that other parts of the app can listen to
+        const cropEvent = new CustomEvent('magicPenCrop', {
+            detail: {
+                crop: crop,
+                totalCrops: this.crops.length,
+                canvasInstance: this
+            }
+        });
+        
+        // Dispatch on the mask canvas element
+        this.mask_canvas.dispatchEvent(cropEvent);
+        
+        // Also dispatch on document for global listeners
+        document.dispatchEvent(cropEvent);
+    }
+
+    getCrops() {
+        return this.crops;
+    }
+
+    clearCrops() {
+        this.crops = [];
+        log('Cleared all magic pen crops');
+    }
+
+    getLastCrop() {
+        return this.crops.length > 0 ? this.crops[this.crops.length - 1] : null;
+    }
+
+    // ============================================================
+    // Magic Pen Prediction Functions
+    // ============================================================
+
+    async sendCropsForPrediction() {
+        /**
+         * Send all collected crops to the server for prediction
+         * Returns the merged prediction mask
+         */
+        if (this.crops.length === 0) {
+            console.warn('No crops to send for prediction');
+            return null;
+        }
+
+        try {
+            log(`Sending ${this.crops.length} crops for prediction...`);
+            const response = await fetch('/magic_pen/predict_crops', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    crops: this.crops,
+                    mode: this.predict_mode,
+                    apply_morphology: this.apply_morphology,
+                    morph_kernel_size: this.morph_kernel_size,
+                    morph_iterations: this.morph_iterations,
+                    apply_dbscan: this.apply_dbscan,
+                    db_eps: this.db_eps,
+                    db_min_samples: this.db_min_samples
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                console.log(`Successfully processed ${result.num_crops_processed} crops`);
+                
+                // Optionally apply the merged prediction to the mask canvas
+                if (result.merged_mask_base64) {
+                    await this.applyPredictionToMask(result.merged_mask_base64);
+                }
+                
+                return result;
+            } else {
+                throw new Error(result.message || 'Prediction failed');
+            }
+
+        } catch (error) {
+            console.error('Error sending crops for prediction:', error);
+            throw error;
+        }
+    }
+
+    async applyPredictionToMask(maskBase64) {
+        /**
+         * Apply the predicted mask to the canvas, only applying white pixels
+         * @param {string} maskBase64 - Base64 encoded mask image
+         */
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+                // Store current state for undo
+                this.storeState();
+                
+                // Create a temporary canvas to process the prediction
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = this.canvas_width;
+                tempCanvas.height = this.canvas_height;
+                const tempCtx = tempCanvas.getContext('2d');
+                
+                // Draw the prediction image to the temporary canvas
+                tempCtx.drawImage(img, 0, 0, this.canvas_width, this.canvas_height);
+                
+                // Get image data from both the prediction and current mask
+                const predictionData = tempCtx.getImageData(0, 0, this.canvas_width, this.canvas_height);
+                const currentMaskData = this.mask_ctx.getImageData(0, 0, this.canvas_width, this.canvas_height);
+                
+                const predictionPixels = predictionData.data;
+                const maskPixels = currentMaskData.data;
+                
+                // Only apply white pixels from prediction to the mask
+                for (let i = 0; i < predictionPixels.length; i += 4) {
+                    // Check if the prediction pixel is white (or close to white)
+                    const r = predictionPixels[i];
+                    const g = predictionPixels[i + 1];
+                    const b = predictionPixels[i + 2];
+                    
+                    // Consider a pixel "white" if all RGB values are above a threshold (e.g., 200)
+                    const isWhite = r > 200 && g > 200 && b > 200;
+                    
+                    if (isWhite) {
+                        // Apply white pixel to the mask
+                        maskPixels[i] = 255;     // Red
+                        maskPixels[i + 1] = 255; // Green
+                        maskPixels[i + 2] = 255; // Blue
+                        maskPixels[i + 3] = 255; // Alpha
+                    }
+                    // If not white, keep the existing mask pixel (don't change anything)
+                }
+                
+                // Apply the modified mask data back to the canvas
+                this.mask_ctx.putImageData(currentMaskData, 0, 0);
+                
+                // Apply threshold to ensure binary mask
+                this.removeGray();
+                
+                console.log('Applied white pixels from prediction mask to canvas');
+                resolve();
+            };
+            img.onerror = () => {
+                console.error('Failed to load prediction mask image');
+                reject(new Error('Failed to load prediction mask'));
+            };
+            img.src = maskBase64;
+        });
+    }
+
+    async sendSingleCropForPrediction(crop) {
+        /**
+         * Send a single crop for prediction (for testing)
+         * @param {Object} crop - Crop object to send
+         */
+        try {
+            const response = await fetch('/magic_pen/predict_single_crop', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    image_base64: crop.image_base64,
+                    centerX: crop.centerX,
+                    centerY: crop.centerY,
+                    width: crop.width,
+                    height: crop.height
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                console.log('Single crop prediction completed');
+                return result;
+            } else {
+                throw new Error(result.message || 'Single crop prediction failed');
+            }
+
+        } catch (error) {
+            console.error('Error sending single crop for prediction:', error);
+            throw error;
+        }
+    }
+
 }

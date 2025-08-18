@@ -27,6 +27,7 @@ export class UI {
         this.switch_mode_btn.addEventListener('click', this.canvas.switchBrushMode.bind(this.canvas));
         this.inc_pensize_btn.addEventListener('click', () => this.canvas.changeBrushSize(8));
         this.dec_pensize_btn.addEventListener('click', () => this.canvas.changeBrushSize(-2));
+        this.toggle_params_btn.addEventListener('click', this.toggleParameterPanel.bind(this));
         window.addEventListener('keydown', this.keyboard_shortcuts.bind(this));
     }
 
@@ -117,6 +118,14 @@ export class UI {
         redo_btn.addEventListener('click', this.canvas.redo.bind(this.canvas));
         this.redo_btn = redo_btn;
 
+        const toggle_params_btn = document.createElement('button');
+        toggle_params_btn.textContent = '🔧 Toggle Parameters (p)';
+        toggle_params_btn.className = 'control-button';
+        toggle_params_btn.id = 'toggle-params';
+        this.toggle_params_btn = toggle_params_btn;
+
+        // Parameter controls section
+        this.createParameterControls();
 
         this.container.appendChild(back_btn);
         this.container.appendChild(open_img_btn);
@@ -132,6 +141,174 @@ export class UI {
         this.container.appendChild(clear_btn);
         this.container.appendChild(undo_btn);
         this.container.appendChild(redo_btn);
+        this.container.appendChild(toggle_params_btn);
+        
+        // Add parameter controls to the container
+        this.container.appendChild(this.parameter_section);
+    }
+
+    createParameterControls() {
+        // Create a section for parameter controls
+        const parameter_section = document.createElement('div');
+        parameter_section.className = 'parameter-section';
+        parameter_section.id = 'parameter-controls';
+        parameter_section.style.cssText = `
+            background: rgba(0, 0, 0, 0.7);
+            font-size: 1vw !important;
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 5px;
+            border: 1px solid #444;
+            width: 20vw;
+            height: 40vh;
+        `;
+        
+        const title = document.createElement('h4');
+        title.textContent = '🔧 Prediction Parameters';
+        title.style.cssText = 'color: white; margin: 0 0 10px 0; font-size: 1vw;';
+        parameter_section.appendChild(title);
+
+        // Morphology controls
+        const morphology_group = this.createParameterGroup('Morphology', [
+            {
+                label: 'Apply Morphology',
+                type: 'checkbox',
+                property: 'apply_morphology',
+                value: this.canvas.apply_morphology,
+                style: 'font-size: 1vw !important; width:100%; height: 50%;'
+            },
+            {
+                label: 'Kernel Size',
+                type: 'range',
+                property: 'morph_kernel_size',
+                value: this.canvas.morph_kernel_size,
+                min: 1,
+                max: 15,
+                step: 2
+            },
+            {
+                label: 'Iterations',
+                type: 'range',
+                property: 'morph_iterations',
+                value: this.canvas.morph_iterations,
+                min: 1,
+                max: 10,
+                step: 1
+            }
+        ]);
+        morphology_group.style.cssText = `
+            font-size: 1vw !important;
+            width: 20vw;
+        `
+
+        // DBSCAN controls
+        const dbscan_group = this.createParameterGroup('DBSCAN Clustering', [
+            {
+                label: 'Apply DBSCAN',
+                type: 'checkbox',
+                property: 'apply_dbscan',
+                value: this.canvas.apply_dbscan
+            },
+            {
+                label: 'EPS (Distance)',
+                type: 'range',
+                property: 'db_eps',
+                value: this.canvas.db_eps,
+                min: 1,
+                max: 100,
+                step: 1
+            },
+            {
+                label: 'Min Samples',
+                type: 'range',
+                property: 'db_min_samples',
+                value: this.canvas.db_min_samples,
+                min: 1,
+                max: 20,
+                step: 1
+            }
+        ]);
+
+        parameter_section.appendChild(morphology_group);
+        parameter_section.appendChild(dbscan_group);
+        
+        this.parameter_section = parameter_section;
+    }
+
+    createParameterGroup(groupName, controls) {
+        const group = document.createElement('div');
+        group.className = 'parameter-group';
+        group.style.cssText = 'margin-bottom: 15px;';
+        
+        const groupTitle = document.createElement('h5');
+        groupTitle.textContent = groupName;
+        groupTitle.style.cssText = `
+            color: #ccc; 
+            margin: 0 0 8px 0; 
+            font-size: 1vw !important; 
+            border-bottom: 1px solid #555; 
+            padding-bottom: 3px;
+            width: 20vw;
+            height: 50%;
+        `;
+        group.appendChild(groupTitle);
+        
+        controls.forEach(control => {
+            const controlDiv = document.createElement('div');
+            controlDiv.style.cssText = 'display: flex; align-items: center; margin-bottom: 8px; justify-content: space-between;';
+            
+            const label = document.createElement('label');
+            label.textContent = control.label;
+            label.style.cssText = 'color: white; font-size: 11px; min-width: 80px;';
+            
+            let input;
+            if (control.type === 'checkbox') {
+                input = document.createElement('input');
+                input.type = 'checkbox';
+                input.checked = control.value;
+                input.style.cssText = 'margin-left: 5px;';
+                
+                input.addEventListener('change', (e) => {
+                    this.canvas[control.property] = e.target.checked;
+                    console.log(`${control.property} set to:`, e.target.checked);
+                });
+            } else if (control.type === 'range') {
+                const rangeContainer = document.createElement('div');
+                rangeContainer.style.cssText = 'display: flex; align-items: center; gap: 5px;';
+                
+                input = document.createElement('input');
+                input.type = 'range';
+                input.min = control.min;
+                input.max = control.max;
+                input.step = control.step;
+                input.value = control.value;
+                input.style.cssText = 'width: 80px;';
+                
+                const valueDisplay = document.createElement('span');
+                const displayValue = control.step < 1 ? control.value.toFixed(1) : control.value;
+                valueDisplay.textContent = displayValue;
+                valueDisplay.style.cssText = 'color: #ccc; font-size: 11px; min-width: 25px; text-align: center;';
+                
+                input.addEventListener('input', (e) => {
+                    const value = control.step === 1 ? parseInt(e.target.value) : parseFloat(e.target.value);
+                    this.canvas[control.property] = value;
+                    // Format display based on step size - show decimals for fractional steps
+                    const displayValue = control.step < 1 ? value.toFixed(1) : value;
+                    valueDisplay.textContent = displayValue;
+                    console.log(`${control.property} set to:`, value);
+                });
+                
+                rangeContainer.appendChild(input);
+                rangeContainer.appendChild(valueDisplay);
+                input = rangeContainer;
+            }
+            
+            controlDiv.appendChild(label);
+            controlDiv.appendChild(input);
+            group.appendChild(controlDiv);
+        });
+        
+        return group;
     }
 
     keyboard_shortcuts(e) {
@@ -166,6 +343,10 @@ export class UI {
             this.toggleUI();
         }
 
+        else if (e.key === 'p') {
+            this.toggleParameterPanel();
+        }
+
         else if (e.key === 'e') {
             this.canvas.changeBrushSize(2);
         }
@@ -183,6 +364,16 @@ export class UI {
         }
         else {
             this.container.style.display = "none";
+        }
+    }
+
+    toggleParameterPanel() {
+        if (this.parameter_section) {
+            if (this.parameter_section.style.display === "none") {
+                this.parameter_section.style.display = "block";
+            } else {
+                this.parameter_section.style.display = "none";
+            }
         }
     }
 

@@ -7,6 +7,7 @@ from typing import Union
 
 from flask import Flask, render_template, jsonify, request, redirect, url_for
 from predictor import Predictor
+from magic_pen_router import magic_pen_router
 
 predictor = Predictor(model_settings_path='model_settings.yaml')
 
@@ -99,6 +100,9 @@ def get_base64_encoded_image(image_path: str) -> str:
 app = Flask(__name__,
             static_url_path='/static',
             static_folder='public')
+
+# Register blueprints
+app.register_blueprint(magic_pen_router, url_prefix='/magic_pen')
 
 
 @app.route("/")
