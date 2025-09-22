@@ -1051,8 +1051,6 @@ export class Canvas {
     const canvasPointX = (viewportCenterX - containerX) / this.zoom_level;
     const canvasPointY = (viewportCenterY - containerY) / this.zoom_level;
 
-    // Apply new zoom
-    const oldZoom = this.zoom_level;
     this.zoom_level = zoomLevel;
     this.updateCanvasDisplay();
 
@@ -1067,8 +1065,6 @@ export class Canvas {
     const newScrollY = newPointY - window.innerHeight / 2;
 
     window.scrollTo(newScrollX, newScrollY);
-
-    console.log(`Zoom level set to: ${this.zoom_level.toFixed(1)}x`);
   }
 
   updateCanvasDisplay() {
