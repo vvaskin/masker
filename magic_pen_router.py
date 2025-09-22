@@ -17,6 +17,8 @@ class PredictionMerger:
         # Arrays to store accumulated values and counts for averaging
         self.accumulated_values = np.zeros((canvas_height, canvas_width), dtype=np.float64)
         self.pixel_counts = np.zeros((canvas_height, canvas_width), dtype=np.int32)
+        # New: track how many times each pixel has been "brushed" by the pen
+        self.brush_counts = np.zeros((canvas_height, canvas_width), dtype=np.int32)
     
     def add_crop_prediction(self, crop_info, prediction_mask):
         """
@@ -24,7 +26,7 @@ class PredictionMerger:
         
         Args:
             crop_info: Dictionary containing centerX, centerY, width, height
-            prediction_mask: 2D numpy array of the prediction (0-255)
+            prediction_mask: 2D numpy array of the prediction normalized to [0.0, 1.0]
         """
         center_x = crop_info['centerX']
         center_y = crop_info['centerY']
@@ -54,11 +56,16 @@ class PredictionMerger:
             valid_prediction = prediction_mask[crop_start_y:crop_end_y, crop_start_x:crop_end_x]
             
             # Add to accumulated values and increment counts
+            # Note: we now accumulate normalized float values (0..1)
             self.accumulated_values[canvas_start_y:canvas_end_y, canvas_start_x:canvas_end_x] += valid_prediction
             self.pixel_counts[canvas_start_y:canvas_end_y, canvas_start_x:canvas_end_x] += 1
+            # Increment brush counts for this region (each crop counts as a brush)
+            self.brush_counts[canvas_start_y:canvas_end_y, canvas_start_x:canvas_end_x] += 1
 
+    # Edited generate_final_prediction
     def generate_final_prediction(self, apply_morphology=True, morph_kernel_size=3, morph_iterations=2,
-                                  apply_dbscan=True, db_eps=10, db_min_samples=5):
+                                  apply_dbscan=True, db_eps=10, db_min_samples=5,
+                                  brush_multiplier_base=2, threshold=0.5):
         """
         Generate the final averaged prediction with optional morphological filtering
         
@@ -66,6 +73,9 @@ class PredictionMerger:
             apply_morphology: Whether to apply morphological operations
             morph_kernel_size: Size of the morphological kernel (default: 3)
             morph_iterations: Number of iterations for morphological operations (default: 2)
+            brush_multiplier_base: Base multiplier for brush counts (default 2). For pixels brushed n times
+                                  multiplier = brush_multiplier_base ** (n-1)
+            threshold: Threshold applied after averaging & multiplying (in 0..1)
             
         Returns:
             2D numpy array of the final prediction (0-255)
@@ -75,8 +85,30 @@ class PredictionMerger:
         final_prediction = np.zeros_like(self.accumulated_values, dtype=np.uint8)
 
         
-        # Average where we have predictions
-        final_prediction[mask] = (self.accumulated_values[mask] / self.pixel_counts[mask]).astype(np.uint8)
+        # Work in float normalized space (0..1)
+        final_float = np.zeros_like(self.accumulated_values, dtype=np.float64)
+        # Average where we have predictions -> values in 0..1
+        final_float[mask] = (self.accumulated_values[mask] / self.pixel_counts[mask])
+
+        # Apply brush-based multiplicative scaling on the averaged float values:
+        # For pixels brushed n times (n>=1), multiply by brush_multiplier_base ** (n-1).
+        if np.any(self.brush_counts > 0):
+            brush_counts_mask = self.brush_counts.astype(np.int32)
+            positive_brush_mask = brush_counts_mask > 0
+            # compute multipliers (float)
+            multipliers = np.ones_like(final_float, dtype=np.float64)
+            multipliers[positive_brush_mask] = brush_multiplier_base ** (brush_counts_mask[positive_brush_mask] - 1)
+            # Apply multipliers where we have averaged predictions
+            apply_mask = mask & positive_brush_mask
+            if np.any(apply_mask):
+                final_float[apply_mask] = final_float[apply_mask] * multipliers[apply_mask]
+
+        # Clip to 0..1 and then threshold to binary mask
+        final_float = np.clip(final_float, 0.0, 1.0)
+        binary_mask = (final_float > float(threshold)).astype(np.uint8) * 255
+
+        # Proceed with DBSCAN and morphology on the binary mask
+        final_prediction = binary_mask
 
         if apply_dbscan:
             final_prediction = predictor.dbscan(final_prediction, eps=db_eps, min_samples=db_min_samples)
@@ -177,6 +209,7 @@ def encode_mask_to_base64(mask):
 
 @magic_pen_router.route('/predict_crops', methods=['POST'])
 def predict_crops():
+# Added brush_multiplier_base and threshold parameters
     """
     Process multiple crops and return a merged prediction mask
     
@@ -224,6 +257,10 @@ def predict_crops():
         crops = data.get('crops', [])
         predict_mode = data.get('mode', 'normal')  # Default to normal mode
 
+        # Brush multiplier base and threshold (use defaults if not provided)
+        brush_multiplier_base = data.get('brush_multiplier_base', 5)
+        threshold = data.get('threshold', 0.5)
+
         # Get morphological filtering parameters (optional)
         apply_morphology = data.get('apply_morphology', True)
         morph_kernel_size = data.get('morph_kernel_size', 3)
@@ -266,16 +303,17 @@ def predict_crops():
                 # Run prediction on the crop
                 prediction_result = predictor(crop_image, mode=predict_mode)
 
-                # Process prediction to get binary mask
+                # Process prediction: use raw probabilities (normalize to 0..1) and add to merger
                 if prediction_result.ndim > 2:
                     prediction_result = prediction_result.squeeze()
-                
-                # Convert to binary mask (assuming prediction is probability map)
-                threshold = 0.5
-                binary_mask = (prediction_result > threshold).astype(np.uint8) * 255
-                
-                # Add to merger
-                merger.add_crop_prediction(crop, binary_mask)
+
+                # Ensure float and normalized to [0,1]
+                pred = prediction_result.astype(np.float32)
+                if pred.max() > 1.0:
+                    pred = pred / 255.0
+
+                # Add normalized prediction to merger (multiplication & thresholding happens later)
+                merger.add_crop_prediction(crop, pred)
                 processed_crops += 1
                 
             except Exception as e:
@@ -301,7 +339,9 @@ def predict_crops():
                 morph_iterations=morph_iterations,
                 apply_dbscan=apply_dbscan,
                 db_eps=db_eps,
-                db_min_samples=db_min_samples
+                db_min_samples=db_min_samples,
+                brush_multiplier_base=brush_multiplier_base,
+                threshold=threshold
             )
             
             # Encode final mask to base64
@@ -386,9 +426,6 @@ def predict_single_crop():
         # Process prediction
         if prediction_result.ndim > 2:
             prediction_result = prediction_result.squeeze()
-        
-        threshold = 0.5
-        binary_mask = (prediction_result > threshold).astype(np.uint8) * 255
         
         # Apply DBSCAN if requested
         apply_dbscan = data.get('apply_dbscan', True)
