@@ -150,13 +150,13 @@ export class UI {
     this.toggle_params_btn = toggle_params_btn;
 
     const zoom_in_btn = document.createElement("button");
-    zoom_in_btn.textContent = "🔍 Zoom In";
+    zoom_in_btn.textContent = "🔍 Zoom In (+)";
     zoom_in_btn.className = "control-button";
     zoom_in_btn.id = "zoom-in";
     this.zoom_in_btn = zoom_in_btn;
 
     const zoom_out_btn = document.createElement("button");
-    zoom_out_btn.textContent = "🔍 Zoom Out";
+    zoom_out_btn.textContent = "🔍 Zoom Out (-)";
     zoom_out_btn.className = "control-button";
     zoom_out_btn.id = "zoom-out";
     this.zoom_out_btn = zoom_out_btn;
@@ -179,8 +179,8 @@ export class UI {
     this.container.appendChild(undo_btn);
     this.container.appendChild(redo_btn);
     this.container.appendChild(toggle_params_btn);
-    this.container.appendChild(zoom_out_btn);
     this.container.appendChild(zoom_in_btn);
+    this.container.appendChild(zoom_out_btn);
 
     // Add parameter controls to the container
     this.container.appendChild(this.parameter_section);
@@ -386,6 +386,10 @@ export class UI {
       this.canvas.changeBrushSize(-2);
     } else if (e.key === "f") {
       this.canvas.resetMask();
+    } else if (e.key === "+") {
+      this.canvas.zoomIn();
+    } else if (e.key === "-") {
+      this.canvas.zoomOut();
     }
   }
 

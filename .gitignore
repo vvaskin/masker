@@ -6,3 +6,4 @@
 *.JPEG
 __pycache__
 *.pth
+.DS_Store
