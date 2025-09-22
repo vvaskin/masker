@@ -1,5 +1,5 @@
 # Masker
-test
+
 ## Description
 
 This is the repo for the web tool for labeling datasets with binary masks
